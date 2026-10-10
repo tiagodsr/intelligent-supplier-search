@@ -7,6 +7,14 @@ output), then a Strands Agents tool-calling agent that writes read-only SQL agai
 self-corrects, asks for clarification and explains the results. FastAPI, Streamlit and Docker come later.
 Status: the data layer is done. The LLM, API and UI are not started.
 
+## Roadmap
+Follow `docs/ROADMAP.md` (ordered steps, each with a definition of done) and
+`docs/golden_set_guide.md` (how to profile the data and build the evaluation set).
+Planned change: the database moves from SQLite to PostgreSQL in roadmap Step 1a. Until that
+step is merged, the Stack, Layout, Commands and Rules sections below describe the working
+state and stay accurate. When Step 1a lands, update them in the same series of commits.
+Do not start a step before the previous one meets its definition of done.
+
 ## Stack
 - Python 3.12 via uv (`requires-python >= 3.10`), src layout, package `assistant`
 - SQLite (stdlib `sqlite3`)
