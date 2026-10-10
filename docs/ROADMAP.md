@@ -3,7 +3,7 @@
 Supplier Search Assistant: ordered build plan from the current data layer to a measured, documented, submittable project.
 
 - Last updated: 2026-10-10
-- Status: planning. The synthetic data layer exists on SQLite. Nothing else is built yet.
+- Status: planning. The synthetic data layer exists on SQLite, and the quality gates (Ruff, pre-commit hooks, CI, protected `main`) are in place. Nothing else is built yet.
 - Companion guide: [golden_set_guide.md](golden_set_guide.md) (how to know the data and build the evaluation set).
 
 ## 0. How to use this document
@@ -20,9 +20,10 @@ Supplier Search Assistant: ordered build plan from the current data layer to a m
 |---|---|---|
 | Data generator | `scripts/build_db.py`: deterministic (seed 42), standard library only, writes SQLite | Step 1a: generation logic untouched, output target becomes PostgreSQL |
 | Database | `data/suppliers.db` (SQLite, committed) | Step 1a: removed from the tree; preserved in git history by the tag `sqlite-final` |
-| DB access | `src/assistant/db.py`: read-only SQLite connection | Steps 1a and 1b: role-based PostgreSQL connections |
+| DB access | `src/assistant/db.py`: read-only SQLite connection | Steps 1a and 1b: one read-only PostgreSQL connection (`app_ro`) |
 | Tests | `tests/`: pytest suite for schema, integrity, data properties, determinism, read-only access | Step 1a: ported (some SQLite-specific tests are replaced) |
 | Docs | `README.md`, `CLAUDE.md`, `docs/data_model.md` | Step 1a: updated for PostgreSQL |
+| Quality gates | Ruff, pre-commit hooks, CI on pull requests, protected `main`, `dev` branch workflow | Done. Step 1a adds a PostgreSQL service to CI for the integration tests |
 | Config | `pyproject.toml` has no runtime dependencies; `.env.example` has `OPENAI_API_KEY`, `DB_PATH` | Dependencies are added step by step, never all at once |
 | LLM code, embeddings, SQL guard, evals, API, UI, Docker | not started | Steps 2 to 10 |
 
@@ -46,7 +47,7 @@ Supplier Search Assistant: ordered build plan from the current data layer to a m
 Streamlit UI ──HTTP──► FastAPI  POST /v1/query {role, question}
                           │ [1] request validated (Pydantic)
                           ▼
-                 Role policy (code): role → database role, visible schema, limits
+                 Role policy (code): role → tools, supplier scope, ranking, limits
                           ▼
                  Intake (LLM #1, cheap model)            [2] IntakeResult
                    │ ambiguous / out of scope / unsafe ──► direct answer (no agent, no SQL)
@@ -60,7 +61,7 @@ Streamlit UI ──HTTP──► FastAPI  POST /v1/query {role, question}
         └──────────┬───────────────┴───────────────────────────────┘
                    ▼                                              [3] tool results typed
         Shared safe execution: guard → EXPLAIN cost check → READ ONLY transaction
-                              → PostgreSQL role with SELECT on its own views only
+                              → PostgreSQL role app_ro: SELECT on the app views only
                    ▼
         Post-validation (code): sanity checks, empty-result diagnostics, confidence
                    ▼
@@ -78,7 +79,9 @@ The numbers in brackets are the points where Pydantic validates data.
 | Module (`src/assistant/`) | Kind | Responsibility |
 |---|---|---|
 | `config.py` | code | Settings from environment: models, limits, thresholds, URLs |
-| `db.py` | code | Role-based PostgreSQL connections (`requester_ro`, `purchaser_ro`) |
+| `db.py` | code | One read-only PostgreSQL connection (`app_ro`) |
+| `roles.py` | code | One frozen `RolePolicy` per role: allowed tools, supplier scope, ranking rule, result limit |
+| `external.py` | code | Purchaser-only search over the fictional external-suppliers fixture |
 | `schemas.py` | code | All Pydantic models, statuses, cross-field validators |
 | `llm.py` | code | The only place that calls the LLM or embedding API; records tokens, latency, cost |
 | `tracing.py` | code | JSONL trace events and summaries (sum, p50, p95) |
@@ -87,7 +90,7 @@ The numbers in brackets are the points where Pydantic validates data.
 | `diagnostics.py` | code | Why a query returned zero rows (which filter removed them) |
 | `schema_introspect.py`, `schema_index.py`, `schema_search.py` | code + embeddings | Schema knowledge: introspect, embed, search |
 | `intake.py` | LLM #1 | Scope, entities, ambiguity, unsafe intent |
-| `tools.py` | code | `search_schema`, `resolve_supplier`, `run_sql` as plain functions |
+| `tools.py` | code | `search_schema`, `resolve_supplier`, `run_sql` and, for the purchaser only, `search_external_suppliers`, as plain functions |
 | `pipeline.py` | LLM #2 | Variant A |
 | `agent.py` | LLM #2 | Variant B (Strands) |
 | `validation.py` | code | Sanity checks, confidence score, final-answer rules |
@@ -101,7 +104,7 @@ The numbers in brackets are the points where Pydantic validates data.
 | `needs_clarification` | The question is ambiguous (entity, metric or period); options are offered |
 | `no_suppliers` | A valid query returned nothing and the filters were verified (diagnostics attached) |
 | `out_of_scope` | Not a supplier or procurement question |
-| `forbidden` | A valid read request, but the data is not visible to this role |
+| `forbidden` | A valid request that this role may not make (for example, a requester asking for suppliers outside the database) |
 | `refused` | Unsafe request (write or DDL intent, injection attempt) |
 | `error` | Internal or upstream failure, or a limit was reached (steps, retries, time). Never shown as an answer |
 
@@ -109,49 +112,55 @@ The numbers in brackets are the points where Pydantic validates data.
 
 | # | Decision | Why | Cost or trade-off |
 |---|---|---|---|
-| D1 | **PostgreSQL**, not SQLite | Real roles and `GRANT`, `READ ONLY` transactions, `statement_timeout`, `EXPLAIN` with cost estimates, and Docker Compose is part of the course anyway | Needs Docker. Time-boxed: if Step 1a passes 2 days, stop and reassess (the tag `sqlite-final` is the way back) |
+| D1 | **PostgreSQL**, not SQLite | A real database permission as the last safety layer (a SELECT-only role that cannot write even if the guard misses something), `READ ONLY` transactions, `statement_timeout`, `EXPLAIN` row and cost estimates, and Docker Compose is part of the course anyway | Needs Docker. Time-boxed: if Step 1a passes 2 days, stop and reassess (the tag `sqlite-final` is the way back) |
 | D2 | **Synthetic data stays** | Deterministic, traps known by construction, no overlap with model training data, no privacy issue | The golden set depends on the exact data; see the guide for freezing and fingerprinting |
-| D3 | **Role = database permission**, not a prompt instruction. No web search | A prompt rule can be talked around; a `GRANT` cannot. Removes an external provider, cost and unverifiable results | The requester and purchaser differ only in what they can read |
-| D4 | Two schemas: `core` (tables) and `app` (views). Roles can only read views in `app` | The agent sees a small, documented, EUR-normalised semantic layer; base tables are unreachable | Six to nine small views to write (Step 1b) |
+| D3 | **Role = policy in code**, not a prompt instruction. One read-only database role | Requester and purchaser read the same data. They differ in which tools they may call, which suppliers they may recommend, the ranking and the result limit. A prompt rule can be talked around, but a tool that is not registered for a role cannot be called, and a validator checks every answer | The database cannot tell the roles apart. The single `app_ro` role is the shared last layer |
+| D4 | Two schemas: `core` (tables) and `app` (views). `app_ro` can only read views in `app`, and both roles see the same ones | The agent sees a small, documented, EUR-normalised semantic layer; base tables are unreachable | Six to nine small views to write (Step 1b) |
 | D5 | **Variant A first, Variant B second** | A is a safety net that already meets the minimum; B is measured against it | None, A is also the baseline |
 | D6 | **Strands Agents** for B (approved extension beyond course material) | Higher ambition for the portfolio | Tools are plain functions so the framework is replaceable. A 2-hour spike decides (Appendix B); fallback is the course's manual loop |
 | D7 | **Embeddings only for schema knowledge** (descriptions, glossary, example queries) | It is the "semantic search over table descriptions and example queries" reuse | Not used on supplier data; see section 8 |
 | D8 | **Confidence from objective signals**, not self-reported | Model self-confidence is poorly calibrated | The score is calibrated in the eval report |
 | D9 | **Every LLM and embedding call goes through `llm.py`** | Cost and latency come for free and cannot be forgotten | Strands calls its model internally, so its usage is read from the run metrics instead |
 | D10 | **Golden set is written before the pipeline**; few-shot examples never overlap it | Prevents tuning the test to the system | Costs two days before any model call |
+| D11 | **Closed world for requesters** | A requester only ever receives suppliers that exist in the database and are `active`. An unknown supplier is reported as not registered, never guessed or searched elsewhere | Needs a validator on every requester answer (Step 9) |
+| D12 | **External suppliers are a fictional fixture**, purchaser only | Gives the purchaser something the requester cannot have (candidates outside the database) without a real web search: no cost, no real names, deterministic and testable | Candidates are labelled `in_database: false` and are not a real market search |
 
 ### Open decisions (D-OPEN)
 
 | # | Question | Default |
 |---|---|---|
-| D-OPEN-1 | Does the requester see catalog `unit_price`? | Yes; never contract discounts or spend |
+| D-OPEN-1 | Does the requester see catalog `unit_price`? | Resolved by D3: both roles read the same views, so yes |
 | D-OPEN-2 | A purchase "in 2025": by cart `created_at` or `completed_at`? | `created_at` (the view exposes it as `cart_created_at`) |
 | D-OPEN-3 | Language of the questions | English, plus a small Portuguese subset to test robustness |
 | D-OPEN-4 | `is_preferred` and `active` as `BOOLEAN` or `0/1` | `BOOLEAN` |
 | D-OPEN-5 | An ambiguous brand (two legal entities): ask or answer for both? | Ask (`needs_clarification`) |
 
-## 5. Roles and data visibility
+## 5. Roles and supplier scope
 
-Four independent places enforce the role. Removing any one of them must not expose data.
+The two roles read the same data through the same `app` views. They differ in policy, which lives in code (`roles.py`, one `RolePolicy` per role).
+
+| | requester | purchaser |
+|---|---|---|
+| Goal | Find the best supplier to order an item from | Explore the market for an item |
+| Supplier scope | Suppliers in the database with `status = 'active'` only | Suppliers in the database (any status, always shown with their status) plus external candidates |
+| `search_external_suppliers` | Not registered | Available |
+| Ranking | Lowest price in the last 12 months, preferring suppliers with a currently valid contract | Highest purchase volume in the last 12 months |
+| Results (maximum) | 3 | 10 |
+
+**The closed-world rule.** A requester never receives a supplier that is not in the database, and never one that is not active. If a requester names a supplier that is not registered, the answer says so (`no_suppliers`); it is never guessed or searched elsewhere. If a requester asks for new suppliers outside the database, the answer is `forbidden`.
+
+**External candidates.** The purchaser's `search_external_suppliers` reads `data/external_suppliers.json`: a small fixture of fictional suppliers that do not exist in the database (a test checks that no name overlaps). Each result carries `in_database: false` and is shown in a separate section of the answer. It stands in for a real web search, which would add cost, nondeterminism and real company names.
+
+Four independent places enforce the role. Removing any one of them must not let a requester see an external or inactive supplier.
 
 1. **Role policy (code):** the role comes from the session, never from the question or from a tool argument.
-2. **Schema search:** index entries carry the roles allowed to see them; a requester never receives purchaser-only tables, columns or examples.
-3. **SQL guard:** the table allowlist is per role.
-4. **Database:** each role has `SELECT` only on its own views.
+2. **Tool registry:** the requester's agent is built without the external search tool, so there is nothing to call.
+3. **Schema search and SQL guard:** the guard allows only the `app` views for both roles; index entries and few-shot examples carry the roles they apply to.
+4. **Post-validation:** every requester answer is checked in code, and any inactive or unregistered supplier makes it fail validation (Step 9). External results are accepted only for a purchaser and only when labelled.
 
-| `app` view | requester_ro | purchaser_ro |
-|---|:-:|:-:|
-| `v_meta` (as-of date, data window) | yes | yes |
-| `v_catalog_suppliers` (name, country, status, risk, preferred, payment terms) | yes | yes |
-| `v_supplier_aliases` | yes | yes |
-| `v_categories` | yes | yes |
-| `v_catalog_items` (offers; price per D-OPEN-1) | yes | yes |
-| `v_supplier_summary` (spend, carts, average delay) | no | yes |
-| `v_completed_lines` (purchases, EUR-normalised) | no | yes |
-| `v_contracts` (discounts, validity) | no | yes |
-| `v_carts` (department, plant, status including cancelled) | no | yes |
+The database adds a shared last layer: one `app_ro` role that can only `SELECT` from the `app` views, in read-only transactions. It protects the data from writes. It does not separate the roles.
 
-When a purchaser query returns nothing, the answer is a diagnosis from the database (which filter removed the rows, what is close), not an external search.
+When a query returns nothing, the answer is a diagnosis from the database (which filter removed the rows, what is close). A purchaser may additionally be offered external candidates, clearly labelled.
 
 ## 6. The agent and its tools
 
@@ -159,11 +168,12 @@ When a purchaser query returns nothing, the answer is a diagnosis from the datab
 
 | Tool | The agent calls it when | It does not call it when | Returns |
 |---|---|---|---|
-| `search_schema(question)` | It needs to know which views, columns, values and business rules apply. Usually first. Again after an `undefined_column` or `undefined_table` error, or when the question touches a new concept | The context already covers the question | Top-k schema documents and example queries visible to the role |
+| `search_schema(question)` | It needs to know which views, columns, values and business rules apply. Usually first. Again after an `undefined_column` or `undefined_table` error, or when the question touches a new concept | The context already covers the question | Top-k schema documents and example queries that apply to the role |
 | `resolve_supplier(name)` | The question names a supplier or brand, before filtering by it | No supplier is named | All matching suppliers (alias, name, country, status). More than one legal entity means ask the user, never pick one |
 | `run_sql(sql)` | It has schema context and resolved identifiers. May be called several times: the query, a fix after an error, a verification query | It has not looked at the schema yet | `ok`, columns, rows (capped), `row_count`, `truncated`, typed error, diagnostics for empty results, timing |
+| `search_external_suppliers(query, region)` | **Purchaser only.** The user wants candidates beyond the database | The role is a requester (the tool does not exist in that session), or the database already answers the question | Fictional external candidates, each with `in_database: false` |
 
-There is no "answer" tool. The final answer is the validated `FinalAnswer`. The role is bound when the tools are created (a closure over the session), so the model cannot pass or change it.
+There is no "answer" tool. The final answer is the validated `FinalAnswer`. The role is bound when the tools are created (a closure over the session), so the model cannot pass or change it, and the requester's tool set simply does not include the external search.
 
 ### Typical sequences
 
@@ -171,7 +181,8 @@ There is no "answer" tool. The final answer is the validated `FinalAnswer`. The 
 2. **Ambiguous brand:** `resolve_supplier("Brabon")` returns two legal entities → `needs_clarification` listing both. No SQL runs.
 3. **Error and repair:** `search_schema` → `run_sql` (typed error `undefined_column`) → `search_schema` → `run_sql` → answer.
 4. **Zero rows:** `run_sql` returns 0 rows with diagnostics (for example, removing the country filter yields 12 rows) → `no_suppliers` carrying that evidence, or a rewritten query.
-5. **Forbidden:** a requester asks for spend → intake and policy mark it `forbidden`. If it reached the guard anyway, the guard or the database would refuse.
+5. **Forbidden:** a requester asks for new suppliers outside the database → intake and policy mark it `forbidden`, no SQL runs, and the external tool does not exist in that session.
+6. **Purchaser, external:** `search_schema` → `run_sql` (suppliers in the database) → `search_external_suppliers` → an answer with two labelled sections.
 
 ### Limits
 
@@ -183,6 +194,7 @@ Maximum tool calls per request, maximum SQL attempts (default 2 repairs), wall-c
 - `no_suppliers` requires diagnostics showing which filters were checked.
 - `needs_clarification` requires a question and at least two options when the cause is entity ambiguity.
 - `forbidden`, `refused`, `out_of_scope` require that no SQL was executed.
+- A requester answer lists only active suppliers that exist in the database. External candidates appear only for a purchaser, and only labelled `in_database: false`.
 - Text coming from the database or from tool results is data. It is never followed as an instruction.
 
 ## 7. Build order
@@ -200,11 +212,11 @@ Gates summarise what must be true at a point in time. At each gate: commit, tag,
 
 Goal: a safe starting point.
 
-- [ ] Local changes committed; `uv run pytest -q` is green on the SQLite version.
-- [ ] `git tag sqlite-final` (keeps the SQLite DB, generator, tests and docs exactly as they are).
-- [ ] Remote repository created and `main` plus tags pushed (the deliverable is a Git repository).
-- [ ] Docker installed; `docker compose version` works.
-- [ ] Optional: do Steps 1a and 1b on a branch and merge when the DoD is met.
+- [x] Local changes committed; `uv run pytest -q` is green on the SQLite version.
+- [x] `git tag sqlite-final` (keeps the SQLite DB, generator, tests and docs exactly as they are).
+- [x] Remote repository created (public), `main` protected, working branch `dev`, tags pushed (the deliverable is a Git repository).
+- [ ] Docker installed; `docker compose version` works (not installed yet on the development machine).
+- [x] Work happens on `dev`; each iteration is merged into `main` through a pull request when the DoD is met.
 - [ ] In parallel, before the final class: proposal material (problem and user, what it does, flow diagram, evaluation idea).
 
 DoD: tag and remote exist, Docker runs.
@@ -216,36 +228,38 @@ Goal: the same data in PostgreSQL, rebuilt by one command. Nothing else changes.
 Why now: the guard, the golden set and the schema index all depend on the final dialect and schema. Changing the database later invalidates them.
 
 - [ ] `docker-compose.yml` with a `db` service: pinned major version (not `latest`), named volume, `pg_isready` healthcheck, credentials from `.env`.
-- [ ] `.env.example`: replace `DB_PATH` with `DATABASE_ADMIN_URL` (role URLs arrive in Step 1b).
+- [ ] `.env.example`: replace `DB_PATH` with `DATABASE_ADMIN_URL` (the application URL arrives in Step 1b).
 - [ ] `uv add "psycopg[binary]"`.
 - [ ] Rewrite only the I/O of `scripts/build_db.py`: PostgreSQL DDL (see Appendix A), `%s` placeholders, tables in schema `core`, the two existing views in schema `app`. All code that draws from the random generator stays identical; the diff must show DDL, inserts and connection code only.
 - [ ] Safety: the script refuses to run unless the target database name is on an allowlist (`suppliers`, `suppliers_test*`), because it drops and recreates schemas.
 - [ ] One-off parity check against the tag: row counts and a per-table checksum must match the SQLite build (`git show sqlite-final:data/suppliers.db > /tmp/old.db`, then compare). Floats are compared after rounding to the stored precision.
-- [ ] Port the tests (Appendix A lists what is SQLite-specific). Mark database tests `@pytest.mark.integration`.
+- [ ] Port the tests (Appendix A lists what is SQLite-specific). Mark database tests `@pytest.mark.integration`. Change the pre-push hook to `pytest -m "not integration"` and add a PostgreSQL service container to the CI test workflow, so pushing needs no Docker while CI still runs the integration tests.
 - [ ] Replace `src/assistant/db.py` with a connection factory. Only `build_db.py` uses the admin URL.
 - [ ] Remove `data/suppliers.db` from the tree.
 - [ ] Update `CLAUDE.md` (stack, layout, commands, the read-only rule), `README.md` and `docs/data_model.md`.
 
 DoD: `docker compose up -d db && uv run python scripts/build_db.py` rebuilds the database; `uv run pytest -q` is green; the parity check reports identical data; docs updated.
 
-### Step 1b. Security and semantic layer (1 day)
+### Step 1b. Semantic layer, read-only role and external fixture (0.5 day)
 
-Goal: roles that can read only what they should, and a schema that documents itself.
+Goal: one safe role that reads a small, documented schema, and the fixture that gives the purchaser something the requester cannot have.
 
-- [ ] Views in `app` per section 5, all selecting from `core`.
+- [ ] Views in `app` (both roles read all of them): `v_meta` (as-of date and data window), `v_catalog_suppliers`, `v_supplier_aliases`, `v_categories`, `v_catalog_items`, `v_contracts`, `v_carts`, `v_completed_lines`, `v_supplier_summary`. All select from `core` and expose EUR-normalised amounts.
 - [ ] `COMMENT ON` for every view and column, including the business rules from `docs/data_model.md` (completed-only purchases, EUR normalisation, as-of date, duplicate brands). The generator's DDL is the single source of these descriptions.
-- [ ] Roles `requester_ro` and `purchaser_ro`: `LOGIN`, `USAGE` on `app`, `SELECT` only on their views, no access to `core`, `CREATE` revoked on `public`. Role-level settings: `default_transaction_read_only = on`, `statement_timeout`, `idle_in_transaction_session_timeout`, `search_path = app`.
-- [ ] `db.get_connection(role)` returns a connection with `read_only` set; passwords come from the environment.
-- [ ] Permission-matrix tests: each role can and cannot select what section 5 says; writes fail; `core` is unreachable; `SET ROLE` does not escalate; every `app` column has a comment.
+- [ ] One role `app_ro`: `LOGIN`, `USAGE` on `app`, `SELECT` only on the `app` views, no access to `core`, `CREATE` revoked on `public`. Role-level settings: `default_transaction_read_only = on`, `statement_timeout`, `idle_in_transaction_session_timeout`, `search_path = app`.
+- [ ] `db.get_connection()` returns a read-only connection as `app_ro`; the URL comes from the environment (`DATABASE_URL`).
+- [ ] `data/external_suppliers.json`: about 15 fictional suppliers that do not exist in the database (name, country, categories, description, `.example` website).
+- [ ] Tests: `app_ro` can select from every view and nothing else; writes fail; `core` is unreachable; `SET ROLE` does not escalate; every `app` column has a comment; no external supplier name appears in `core.suppliers` or its aliases.
 
-DoD: the permission matrix passes; `\d+ app.v_completed_lines` in `psql` shows the descriptions.
+DoD: the permission tests pass; `\d+ app.v_completed_lines` in `psql` shows the descriptions.
 
 ### Step 2. Contracts (0.5 day)
 
 Goal: fix the shapes that connect the components before building them.
 
 - [ ] `schemas.py`: `Role`, `Status`, `QueryRequest`, `IntakeResult` (in scope, unsafe, intent, entities, ambiguity with interpretations), tool results (`SchemaSearchResult`, `SupplierCandidates`, `SqlResult` with typed error and diagnostics), `FinalAnswer` (status, answer, SQL, rows, evidence, assumptions, clarification, confidence, usage, warnings) and `TraceEvent`.
-- [ ] Cross-field validators for the rules in section 6.
+- [ ] `roles.py`: a frozen `RolePolicy` per role (allowed tools, supplier scope, ranking rule, maximum results) and `external.py` loading the fixture, with unit tests (the requester policy has no external tool).
+- [ ] Cross-field validators for the rules in sections 5 and 6 (for example, a requester answer cannot contain an external supplier).
 - [ ] Unit tests: valid objects round-trip; invalid combinations are rejected.
 
 DoD: tests green, no LLM or database needed.
@@ -305,7 +319,7 @@ DoD: retrieval recall measured and reported; k chosen.
 Goal: the first complete, measured run.
 
 - [ ] `intake.py` (cheap model, structured output) and its tests with a fake client.
-- [ ] `pipeline.py`: intake → direct answer if ambiguous, out of scope or unsafe → resolve supplier mentions in code (more than one legal entity means clarify) → `search_schema` → generate SQL (structured `GeneratedSQL`) → executor → one repair attempt with the error message → diagnostics on zero rows → explanation → `FinalAnswer`.
+- [ ] `pipeline.py`: intake → direct answer if ambiguous, out of scope or unsafe → resolve supplier mentions in code (more than one legal entity means clarify) → `search_schema` → generate SQL (structured `GeneratedSQL`) → executor → one repair attempt with the error message → diagnostics on zero rows → external candidates (purchaser only) → explanation → `FinalAnswer`.
 - [ ] `evals/run_eval.py --variant A --split development --repeat N --max-cases M`: prints a cost estimate and asks for confirmation above a threshold; writes JSON and Markdown to `evals/reports/` (git-ignored). Final reports are copied to `docs/results/`.
 - [ ] Metrics: see section 10.
 - [ ] Baseline report with a written diagnosis of at least one failure (retrieval, generation, validation or the test itself) before changing anything.
@@ -317,7 +331,7 @@ DoD: A runs on the development split; the report has accuracy per category and t
 Goal: the same parts, orchestrated by an agent, compared fairly with A.
 
 - [ ] Spike first (at most 2 hours): Appendix B. If it fails, use the manual tool loop from the course.
-- [ ] `tools.py` exposes the three tools; `agent.py` builds the agent with a role-bound tool factory, a role-aware system prompt (as-of date, rules), and limits.
+- [ ] `tools.py` exposes `search_schema`, `resolve_supplier`, `run_sql` and, for the purchaser only, `search_external_suppliers`; `agent.py` builds the agent with a role-bound tool factory (the requester's agent has no external tool), a role-aware system prompt (as-of date, rules, ranking, result limit), and limits.
 - [ ] Trace via hooks: one `TraceEvent` per tool call; token usage from the run metrics.
 - [ ] `FinalAnswer` produced through structured output and validated by the section 6 rules.
 - [ ] Run B with 3 repetitions per case; produce the A-versus-B table.
@@ -328,6 +342,7 @@ DoD: A-versus-B table (accuracy, clarification and refusal correctness, consiste
 ### Step 9. Post-validation and confidence (0.5 to 1 day)
 
 - [ ] Sanity checks in code: amounts summed across currencies without conversion or grouping; dates outside the data window; key columns mostly `NULL` after a join; truncated results; results far outside plausible ranges.
+- [ ] Closed-world validator for requester answers: every supplier in the rows exists in `core.suppliers` with `status = 'active'`, and no external candidate is accepted.
 - [ ] Confidence score from objective signals: guard passed on the first try, repairs used, sanity checks passed, schema coverage (tables used against tables retrieved), diagnostics present for empty results. Return the score and its breakdown.
 - [ ] The eval report adds accuracy per confidence bucket (calibration).
 - [ ] Unit tests for every check.
@@ -336,7 +351,7 @@ DoD: each check has a test; the calibration table is in the report.
 
 ### Step 10. API, UI and Compose (2 days)
 
-- [ ] FastAPI: `POST /v1/query` (returns `FinalAnswer` with usage), `GET /v1/schema?role=` (schema visible to that role), `GET /health` (independent of the LLM). Input errors map to 400, upstream LLM failures to 502. Tests with `TestClient` and a fake LLM.
+- [ ] FastAPI: `POST /v1/query` (returns `FinalAnswer` with usage), `GET /v1/schema` (the `app` views and their descriptions), `GET /health` (independent of the LLM). Input errors map to 400, upstream LLM failures to 502. Tests with `TestClient` and a fake LLM.
 - [ ] Streamlit: role selector, chat, status badge, answer, SQL block, rows table, evidence and diagnostics, confidence breakdown, trace expander with steps, tools, latency and cost. The UI talks to the API over HTTP with timeouts.
 - [ ] Compose: `db`, `api`, `ui`; secrets at runtime, never in images; healthchecks; a smoke-test script.
 
@@ -367,7 +382,7 @@ They are used in one place only: **finding the relevant part of the schema and t
 | When | What happens |
 |---|---|
 | Offline, once per schema change (`scripts/build_index.py`) | Each view description, column description, glossary rule and example question-to-SQL pair becomes a vector stored in `index/` |
-| Online, on every `search_schema` call (Variant A and Variant B) | The question becomes one vector (one small API call), is compared with the stored vectors, and the top-k documents visible to the role are returned |
+| Online, on every `search_schema` call (Variant A and Variant B) | The question becomes one vector (one small API call), is compared with the stored vectors, and the top-k documents that apply to the role are returned |
 
 The index records a fingerprint of the schema it was built from. A mismatch stops the application with the rebuild command, which is how this project avoids stale documentation.
 
@@ -406,7 +421,7 @@ Adapt these patterns; do not import from the course repository.
 | Execution accuracy | For answerable cases, the system's result matches the expected result under the guide's comparison rules |
 | Status accuracy | Final status equals the expected status |
 | Clarification precision and recall | Asked when it should have; did not ask when it should not |
-| Refusal and permission correctness | Unsafe cases are `refused` and forbidden cases are `forbidden`, with zero statements executed |
+| Refusal and role-policy correctness | Unsafe cases are `refused` and forbidden cases are `forbidden`, with zero statements executed |
 | Unsafe queries executed | Counted from the audit log. Target: zero |
 | Consistency | Share of cases with the same outcome in all 3 repetitions; also pass in all 3 |
 | Cost | Per question (mean, p95) and per correct answer |
@@ -426,7 +441,7 @@ Adapt these patterns; do not import from the course repository.
 | Tier | Needs | Marker | Examples |
 |---|---|---|---|
 | Unit | nothing | (default) | Pydantic validators, guard rules, sanity checks, cost maths, comparison rules |
-| Integration | the Compose database | `integration` | Role permissions, executor, diagnostics, data properties, determinism, fingerprint, golden-set validity |
+| Integration | the Compose database | `integration` | Role policy, database role, executor, diagnostics, data properties, determinism, fingerprint, golden-set validity |
 | Eval | OpenAI API (costs money) | `eval` or `evals/run_eval.py` | Accuracy, cost, latency, calibration |
 
 ```bash
@@ -451,6 +466,7 @@ Register the markers in `pyproject.toml`. Database tests build a throwaway datab
 | A reviewer cannot run it | README quick start, committed results in `docs/results/`, unit tests need no database or API key |
 | Secrets leak | `.env` ignored, secrets passed at runtime, none in images or logs |
 | Prompt injection through database text | Tool results are data; delimiters in prompts; a stubbed tool output carrying an injection string is part of the tests |
+| A requester obtains an external or inactive supplier | The tool is not registered for the role; a validator checks every answer; adversarial role tests (the requester asks for the external tool, names an external supplier, or claims to be a purchaser in the question) |
 
 ## 13. Schedule (14 working days)
 
@@ -477,11 +493,11 @@ If you are behind at the end of Day 9, ship Variant A (it satisfies every course
 
 **Cut list, in order:** (1) Docker packaging of `api` and `ui`, keeping `db`; (2) Streamlit polish; (3) repetitions from 3 to 2; (4) Step 9 reduced to sanity checks and a simple score; (5) automatic empty-result diagnostics replaced by a prompt rule; (6) Variant B becomes a stretch.
 
-**Never cut:** the guard and role permissions, the golden set and comparison, the cost and latency table, the README results, the tests.
+**Never cut:** the guard, the role policy and the read-only database role, the golden set and comparison, the cost and latency table, the README results, the tests.
 
 ## 14. Out of scope
 
-Web search and external alternatives; user feedback loop (if added later, feedback stays in a separate pool and is never promoted automatically into the golden set or the few-shot examples); React frontend; authentication; cloud deployment; multi-agent orchestration; long-term memory.
+Real web search (the purchaser's external candidates come from a fictional fixture); user feedback loop (if added later, feedback stays in a separate pool and is never promoted automatically into the golden set or the few-shot examples); React frontend; authentication; cloud deployment; multi-agent orchestration; long-term memory.
 
 ## 15. Definition of done for the project
 
@@ -489,7 +505,7 @@ Web search and external alternatives; user feedback loop (if added later, feedba
 - [ ] Every missing-information path ends in an explicit status, each covered by test cases
 - [ ] Golden set (30 to 40 cases) and a runner; holdout run once
 - [ ] Zero unsafe queries executed across the adversarial and golden cases, shown in the README
-- [ ] Roles enforced by database permissions, with tests
+- [ ] Roles enforced by the tool registry and validators on top of one read-only database role, with tests showing that a requester never receives an external or inactive supplier
 - [ ] Cost and latency table for A and B in the README
 - [ ] Evidence (SQL, rows, diagnostics, trace) visible with every answer
 - [ ] Reproducible: one command rebuilds the database, one command rebuilds the schema index
@@ -558,8 +574,7 @@ OPENAI_INTAKE_MODEL=            # cheap model for intake
 OPENAI_AGENT_MODEL=             # model for pipeline A generation and for agent B
 OPENAI_EMBEDDING_MODEL=text-embedding-3-small
 DATABASE_ADMIN_URL=             # build_db.py only
-DATABASE_URL_REQUESTER=
-DATABASE_URL_PURCHASER=
+DATABASE_URL=                   # app_ro: read-only, used by the application
 TRACE_PATH=                     # JSONL trace output
 ```
 

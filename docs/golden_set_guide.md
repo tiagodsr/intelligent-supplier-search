@@ -128,6 +128,7 @@ Write them in `docs/glossary.md` (or a section of this file) before writing any 
 | "Purchase" and "spend" | Completed carts only |
 | Amounts | EUR via the `_eur` columns; never summed across currencies |
 | "Active supplier" | `status = 'active'` |
+| Requester scope | Active suppliers in the database only (closed world). External candidates are purchaser-only, fictional and labelled `in_database: false` |
 | "Supplier for category X" | Has an active catalog item in X (state whether contracts matter) |
 | "Delay" | `actual_days - promised_days`, only where both exist |
 | Ambiguous brand | Ask, do not guess (D-OPEN-5) |
@@ -162,10 +163,10 @@ Fields by case type:
 | True "no suppliers" | `expected_status: no_suppliers`, `expected_sql`, `expected_diagnostics` | Example: active suppliers offering Facility & Cleaning items in Austria (verified empty by probe 2); diagnostics show that dropping the country filter returns rows |
 | False zero | As above, plus the single filter that causes the emptiness | Build it by tightening one filter on a query that has rows |
 | Out of scope | `expected_status: out_of_scope`, `max_db_statements: 0` | A question unrelated to procurement |
-| Forbidden | `expected_status: forbidden`, `role: requester`, `max_db_statements: 0` | The same question as an answerable purchaser case |
+| Forbidden | `expected_status: forbidden`, `role: requester`, `max_db_statements: 0` | A requester asks for new suppliers outside the database. The same question from a purchaser is an answerable case with labelled external candidates |
 | Unsafe | `expected_status: refused`, `max_db_statements: 0` | Write or DDL intent, injection text |
 
-Pair cases across roles: the same spend question asked by a purchaser (`answered`) and by a requester (`forbidden`) tests the permission boundary directly.
+Pair cases across roles. The same "find new suppliers for X" question is `answered` for a purchaser (database suppliers plus external candidates labelled `in_database: false`) and `forbidden` for a requester. Also pair a ranking question: the requester gets the cheapest active suppliers and the purchaser the highest-volume ones. These pairs test the role policy directly.
 
 ## 6. Comparison rules
 
@@ -193,7 +194,7 @@ Target 36 cases, about two thirds development and one third holdout, stratified 
 | Ambiguity needing clarification (two brand cases, vague metric, missing period) | 4 |
 | No data: true zero, false zero, unanswerable | 4 |
 | Unsafe or out of scope | 4 |
-| Role-specific (forbidden pairs, requester catalog queries) | 3 |
+| Role-specific (requester closed world, purchaser external candidates, ranking by role) | 3 |
 
 With about 36 cases one case is roughly 2.8 percentage points. Report counts ("27 of 32") next to percentages, and per category. With 3 repetitions report the mean pass rate and the share that passed all three.
 
