@@ -1,0 +1,35 @@
+name: Unit Tests Workflow
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    name: Unit tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        # The project promises Python >= 3.10, so test the floor and the version used locally.
+        python-version: ["3.10", "3.12"]
+    env:
+      UV_PYTHON: ${{ matrix.python-version }}
+    steps:
+      - name: SETUP - Checkout
+        uses: actions/checkout@v7
+
+      - name: SETUP - uv
+        uses: astral-sh/setup-uv@v10
+        with:
+          enable-cache: true
+
+      - name: PYTHON - Install dependencies
+        run: uv sync --locked
+
+      - name: TESTS - Run pytest
+        run: uv run pytest -q

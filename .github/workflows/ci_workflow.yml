@@ -1,0 +1,31 @@
+name: CI Workflow
+
+on:
+  workflow_dispatch:
+  workflow_call:
+  push:
+    branches:
+      - dev
+  pull_request:
+    branches:
+      - dev
+      - main
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linting:
+    uses: ./.github/workflows/linting_workflow.yml
+
+  unit-tests:
+    uses: ./.github/workflows/unit_tests_workflow.yml
