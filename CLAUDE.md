@@ -7,6 +7,14 @@ output), then a Strands Agents tool-calling agent that writes read-only SQL agai
 self-corrects, asks for clarification and explains the results. FastAPI, Streamlit and Docker come later.
 Status: the data layer is done. The LLM, API and UI are not started.
 
+## Roadmap
+Follow `docs/ROADMAP.md` (ordered steps, each with a definition of done) and
+`docs/golden_set_guide.md` (how to profile the data and build the evaluation set).
+Planned change: the database moves from SQLite to PostgreSQL in roadmap Step 1a. Until that
+step is merged, the Stack, Layout, Commands and Rules sections below describe the working
+state and stay accurate. When Step 1a lands, update them in the same series of commits.
+Do not start a step before the previous one meets its definition of done.
+
 ## Stack
 - Python 3.12 via uv (`requires-python >= 3.10`), src layout, package `assistant`
 - SQLite (stdlib `sqlite3`)
@@ -24,6 +32,8 @@ Status: the data layer is done. The LLM, API and UI are not started.
 uv sync                                   # set up .venv
 uv run python scripts/build_db.py         # rebuild data/suppliers.db (deletes it first)
 uv run pytest -q                          # run tests
+uv run pre-commit install                 # once per clone: checks on commit, tests on push
+uv run pre-commit run --all-files         # run every check the way CI does
 ```
 
 ## Rules
@@ -38,4 +48,8 @@ uv run pytest -q                          # run tests
   queries** given to the model. Keep them in separate files, with no overlap.
 - **No secrets in the repo.** Commit only `.env.example` and never `.env`. Read keys from env vars.
 - "Today" in the data is `meta.as_of_date` (2026-10-03). Only `status='completed'` carts are purchases.
-- Make small, focused commits on `main`.
+- Work on `dev` with small, focused commits. Merge `dev` into `main` through a pull request
+  (merge commit, not squash) once `uv run pytest -q` is green. Never push directly to `main`.
+- Never bypass the hooks with `--no-verify`. If a hook reformats files, run `git add -u` and
+  commit again, so no separate "fix formatting" commit is needed. CI runs the same checks.
+- Do not reformat or lint-fix `scripts/build_db.py` (exempt in `pyproject.toml`).

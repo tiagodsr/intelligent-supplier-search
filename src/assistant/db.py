@@ -1,4 +1,5 @@
 """Read-only access to the SQLite supplier database."""
+
 import os
 import sqlite3
 from pathlib import Path

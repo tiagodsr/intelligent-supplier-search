@@ -1,0 +1,113 @@
+name: Linting Workflow
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Python - Ruff
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: SETUP - Checkout
+        uses: actions/checkout@v7
+
+      - name: SETUP - uv
+        uses: astral-sh/setup-uv@v10.3.0
+        with:
+          enable-cache: true
+
+      - name: PYTHON - Install dependencies
+        run: uv sync --locked
+
+      - name: PYTHON - Ruff linter
+        run: uv run ruff check --output-format=github
+
+      - name: PYTHON - Ruff formatter
+        run: uv run ruff format --check --diff
+
+  secrets:
+    name: Security - Gitleaks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: SETUP - Checkout (full history)
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: SECURITY - Scan for secrets
+        uses: gitleaks/gitleaks-action@v3
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_COMMENTS: "false"
+
+  terraform:
+    name: Terraform - Format, Validate, TFLint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: SETUP - Checkout
+        uses: actions/checkout@v7
+
+      - name: INFO - No Terraform code yet
+        if: hashFiles('infrastructure/**/*.tf') == ''
+        run: echo "No .tf files under infrastructure/, nothing to lint."
+
+      - name: TERRAFORM - Setup
+        if: hashFiles('infrastructure/**/*.tf') != ''
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: 1.16.5
+          terraform_wrapper: false
+
+      - name: TERRAFORM - Formatting check
+        if: hashFiles('infrastructure/**/*.tf') != ''
+        working-directory: infrastructure
+        run: terraform fmt -check -recursive -diff
+
+      - name: TERRAFORM - Validation
+        if: hashFiles('infrastructure/**/*.tf') != ''
+        working-directory: infrastructure
+        run: |
+          terraform init -backend=false -input=false
+          terraform validate
+
+      - name: TERRAFORM - Set up TFLint
+        if: hashFiles('infrastructure/**/*.tf') != ''
+        uses: terraform-linters/setup-tflint@v6
+        with:
+          tflint_version: v0.64.0
+          tflint_wrapper: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: TERRAFORM - TFLint
+        if: hashFiles('infrastructure/**/*.tf') != ''
+        working-directory: infrastructure
+        run: |
+          tflint --init --config="$GITHUB_WORKSPACE/.tflint.hcl"
+          tflint --config="$GITHUB_WORKSPACE/.tflint.hcl" --recursive --format compact
+
+  docker:
+    name: Docker - Hadolint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: SETUP - Checkout
+        uses: actions/checkout@v7
+
+      - name: INFO - No Dockerfile yet
+        if: hashFiles('**/Dockerfile') == ''
+        run: echo "No Dockerfile in the repository, nothing to lint."
+
+      - name: DOCKER - Hadolint
+        if: hashFiles('**/Dockerfile') != ''
+        uses: hadolint/hadolint-action@v3.5.0
+        with:
+          dockerfile: Dockerfile
+          recursive: true

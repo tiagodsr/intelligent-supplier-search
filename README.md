@@ -48,6 +48,26 @@ The tests build a fresh database in a temp directory. They check the schema, int
 the data properties the agent depends on, reproducibility across runs, and that the
 read-only connection (`assistant.db.get_readonly_connection`) rejects writes.
 
+## Development workflow
+
+Work happens on the `dev` branch. When an iteration is finished and green, open a pull
+request from `dev` to `main` and merge it with a merge commit. `main` is protected.
+
+Install the git hooks once per clone:
+
+```bash
+uv run pre-commit install
+```
+
+| When | What runs |
+|---|---|
+| `git commit` | File hygiene, secret scan (gitleaks), Ruff lint and format, a block on committing to `main`, and Terraform and Dockerfile linters once such files exist |
+| `git push` | The same checks, plus the test suite |
+| Pull request (GitHub Actions) | Ruff, gitleaks, Terraform and Hadolint (when present), and the tests on Python 3.10 and 3.12 |
+
+If a hook reformats a file, the commit stops once: run `git add -u` and commit again.
+To run every check by hand: `uv run pre-commit run --all-files`.
+
 ## Layout
 
 ```
