@@ -32,6 +32,8 @@ Do not start a step before the previous one meets its definition of done.
 uv sync                                   # set up .venv
 uv run python scripts/build_db.py         # rebuild data/suppliers.db (deletes it first)
 uv run pytest -q                          # run tests
+uv run pre-commit install                 # once per clone: checks on commit, tests on push
+uv run pre-commit run --all-files         # run every check the way CI does
 ```
 
 ## Rules
@@ -48,3 +50,6 @@ uv run pytest -q                          # run tests
 - "Today" in the data is `meta.as_of_date` (2026-10-03). Only `status='completed'` carts are purchases.
 - Work on `dev` with small, focused commits. Merge `dev` into `main` through a pull request
   (merge commit, not squash) once `uv run pytest -q` is green. Never push directly to `main`.
+- Never bypass the hooks with `--no-verify`. If a hook reformats files, run `git add -u` and
+  commit again, so no separate "fix formatting" commit is needed. CI runs the same checks.
+- Do not reformat or lint-fix `scripts/build_db.py` (exempt in `pyproject.toml`).
