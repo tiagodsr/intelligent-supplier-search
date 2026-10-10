@@ -46,4 +46,5 @@ uv run pytest -q                          # run tests
   queries** given to the model. Keep them in separate files, with no overlap.
 - **No secrets in the repo.** Commit only `.env.example` and never `.env`. Read keys from env vars.
 - "Today" in the data is `meta.as_of_date` (2026-10-03). Only `status='completed'` carts are purchases.
-- Make small, focused commits on `main`.
+- Work on `dev` with small, focused commits. Merge `dev` into `main` through a pull request
+  (merge commit, not squash) once `uv run pytest -q` is green. Never push directly to `main`.
