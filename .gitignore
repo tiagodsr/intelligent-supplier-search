@@ -5,3 +5,7 @@ __pycache__/
 index/
 .DS_Store
 .ruff_cache/
+.env.*
+!.env.example
+*.pem
+*.key
