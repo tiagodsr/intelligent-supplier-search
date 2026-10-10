@@ -61,6 +61,13 @@ repos:
         always_run: true
         stages: [pre-push]
 
+  # GITHUB ACTIONS (catches workflow mistakes before they are pushed)
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint
+        name: GitHub Actions - Actionlint
+
   # TERRAFORM (only runs when .tf files are staged; needs terraform and tflint installed)
   - repo: https://github.com/antonbabenko/pre-commit-terraform
     rev: v1.109.2
