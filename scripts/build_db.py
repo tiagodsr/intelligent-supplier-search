@@ -557,7 +557,7 @@ def build(db_path, seed):
             aliases.add(s["base"])
         if rng.random() < 0.30:
             aliases.add(s["name"].rsplit(" ", 1)[0] if " " in s["name"] else s["name"])
-        for a in aliases:
+        for a in sorted(aliases):  # sorted: set order depends on PYTHONHASHSEED
             alias_rows.append((aid, s["id"], a))
             aid += 1
     conn.executemany("INSERT INTO supplier_aliases VALUES (?,?,?)", alias_rows)
