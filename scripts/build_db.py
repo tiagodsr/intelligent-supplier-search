@@ -3,10 +3,12 @@
 Everything here is fictional: supplier names, prices, carts, contracts.
 The data is deterministic (fixed seed) and uses only the standard library.
 
-Usage:
-    python3 build_db.py                # writes suppliers.db next to this script
-    python3 build_db.py --seed 7       # different (but reproducible) data
-    python3 build_db.py --out path/to/suppliers.db
+Usage (from the repo root):
+    python scripts/build_db.py                # writes data/suppliers.db
+    python scripts/build_db.py --seed 7       # different (but reproducible) data
+    python scripts/build_db.py --out path/to/suppliers.db
+
+Warning: the output file is deleted and rebuilt.
 """
 import argparse
 import math
@@ -18,6 +20,8 @@ from pathlib import Path
 AS_OF = date(2026, 10, 3)  # "today" inside the dataset
 DATA_START = date(2023, 1, 2)
 DATA_END = date(2026, 9, 30)
+
+DEFAULT_OUT = Path(__file__).resolve().parent.parent / "data" / "suppliers.db"
 
 # --------------------------------------------------------------------------- #
 # Reference data
@@ -755,7 +759,7 @@ def build(db_path, seed):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--out", type=Path, default=Path(__file__).resolve().parent / "suppliers.db")
+    parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     args = parser.parse_args()
     args.out.parent.mkdir(parents=True, exist_ok=True)
     counts = build(args.out, args.seed)
