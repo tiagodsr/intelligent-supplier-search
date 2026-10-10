@@ -556,7 +556,8 @@ def build(db_path, seed):
         if s["base"] in brand_has_sister or rng.random() < 0.40:
             aliases.add(s["base"])
         if rng.random() < 0.30:
-            aliases.add(s["name"].rsplit(" ", 1)[0] if " " in s["name"] else s["name"])
+            # strip the full legal suffix ("Sp. z o.o.", "Co., Ltd"), not just the last word
+            aliases.add(s["name"].removesuffix(" " + country_info[s["country"]][4]))
         for a in sorted(aliases):  # sorted: set order depends on PYTHONHASHSEED
             alias_rows.append((aid, s["id"], a))
             aid += 1
